@@ -36,11 +36,14 @@ export interface ShapePoint {
 export interface TripRow {
   shape_id?: string
   route_id?: string
+  wheelchair_accessible?: string
   [key: string]: string | undefined
 }
 
 export interface RouteRow {
   route_id?: string
+  route_short_name?: string
+  route_long_name?: string
   route_color?: string
   [key: string]: string | undefined
 }

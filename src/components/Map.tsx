@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react'
-import { MapContainer, TileLayer, Polyline } from 'react-leaflet'
+import React, { useMemo, useState } from 'react'
+import { MapContainer, TileLayer, Polyline, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
@@ -99,21 +99,180 @@ const LeafletMap: React.FC = () => {
     return routeColorMap
   }, [routes])
 
+  const routeShortName: Map<string, string> = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of routes) {
+      if (r.route_id) m.set(r.route_id, r.route_short_name || r.route_long_name || r.route_id)
+    }
+    return m
+  }, [routes])
+
+  const haversine = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+    const toRad = (v: number) => (v * Math.PI) / 180
+    const R = 6371000
+    const dLat = toRad(lat2 - lat1)
+    const dLon = toRad(lon2 - lon1)
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return R * c
+  }
+
+  const pointToSegmentDistance = (
+    p: { lat: number; lon: number },
+    v: { lat: number; lon: number },
+    w: { lat: number; lon: number }
+  ) => {
+    const meanLat = (v.lat + w.lat + p.lat) / 3
+    const mPerDegLat = 111320
+    const mPerDegLon = Math.cos((meanLat * Math.PI) / 180) * 111320
+    const px = (p.lon - v.lon) * mPerDegLon
+    const py = (p.lat - v.lat) * mPerDegLat
+    const vx = 0
+    const vy = 0
+    const wx = (w.lon - v.lon) * mPerDegLon
+    const wy = (w.lat - v.lat) * mPerDegLat
+    const l2 = wx * wx + wy * wy
+    let t = 0
+    if (l2 !== 0) t = Math.max(0, Math.min(1, (px * wx + py * wy) / l2))
+    const projx = vx + t * wx
+    const projy = vy + t * wy
+    const dx = px - projx
+    const dy = py - projy
+    return Math.sqrt(dx * dx + dy * dy)
+  }
+
+  const stopToRouteNames: Map<string, string[]> = useMemo(() => {
+    const thresholdMeters = 80
+    const mapRes = new Map<string, Set<string>>()
+    const mapResIds = new Map<string, Set<string>>()
+    for (const [shapeId, points] of Array.from(shapeMap.entries())) {
+      const routeId = shapeToRoute.get(shapeId)
+      if (!routeId) continue
+      const routeName = (routeShortName.get(routeId) || routeId) as string
+      for (const stop of stopPoints) {
+        let minDist = Infinity
+        for (let i = 0; i < points.length - 1; i++) {
+          const a = points[i]
+          const b = points[i + 1]
+          const d = pointToSegmentDistance({ lat: stop.lat, lon: stop.lon }, { lat: a.lat, lon: a.lon }, { lat: b.lat, lon: b.lon })
+          if (d < minDist) minDist = d
+        }
+        if (points.length === 1) {
+          const d = haversine(stop.lat, stop.lon, points[0].lat, points[0].lon)
+          if (d < minDist) minDist = d
+        }
+        if (minDist <= thresholdMeters) {
+          if (!mapRes.has(stop.id)) mapRes.set(stop.id, new Set())
+          mapRes.get(stop.id)!.add(routeName)
+          if (!mapResIds.has(stop.id)) mapResIds.set(stop.id, new Set())
+          mapResIds.get(stop.id)!.add(routeId)
+        }
+      }
+    }
+    const final = new Map<string, string[]>()
+    for (const [k, s] of mapRes.entries()) final.set(k, Array.from(s))
+    ;(final as any).__ids = new Map<string, string[]>()
+    for (const [k, s] of mapResIds.entries()) (final as any).__ids.set(k, Array.from(s))
+    return final
+  }, [shapeMap, shapeToRoute, stopPoints, routeShortName])
+
+  const stopToRouteIds: Map<string, string[]> = useMemo(() => {
+    return ((stopToRouteNames as any).__ids as Map<string, string[]>) || new Map()
+  }, [stopToRouteNames])
+
+  const routeWheelchair: Map<string, boolean> = useMemo(() => {
+    const m = new Map<string, boolean>()
+    for (const t of trips) {
+      const rid = t.route_id
+      if (!rid) continue
+      const val = (t.wheelchair_accessible || '').trim()
+      if (val === '1') m.set(rid, true)
+      else if (!m.has(rid)) m.set(rid, false)
+    }
+    return m
+  }, [trips])
+
+  const [selectedRoute, setSelectedRoute] = useState<string>('')
+  const [routeSearch, setRouteSearch] = useState<string>('')
+  const [wheelchairOnly, setWheelchairOnly] = useState<boolean>(false)
+  const [stopMetaFilter, setStopMetaFilter] = useState<string>('')
+
+  const allRouteNames = useMemo(() => {
+    const setNames = new Set<string>()
+    for (const [_, name] of routeShortName.entries()) setNames.add(name)
+    return Array.from(setNames).sort((a, b) => a.localeCompare(b))
+  }, [routeShortName])
+
   return (
     <MapContainer center={[47.2184, -1.5536]} zoom={12} style={{ height: '100vh', width: '100%' }}>
       <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap" />
 
-      {/* render shapes as polylines */}
+  <div style={{ position: 'absolute', right: 10, top: 10, zIndex: 400, background: 'white', padding: 8, borderRadius: 6, boxShadow: '0 1px 4px rgba(0,0,0,0.2)', maxWidth: 320 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Filtres</div>
+        <div style={{ marginBottom: 6 }}>
+          <label style={{ display: 'block', fontSize: 12 }}>Rechercher une ligne</label>
+          <input value={routeSearch} onChange={(e) => setRouteSearch(e.target.value)} placeholder="Rechercher..." style={{ width: '100%' }} />
+        </div>
+        <div style={{ marginBottom: 6 }}>
+          <label style={{ display: 'block', fontSize: 12 }}>Sélectionner une ligne</label>
+          <select value={selectedRoute} onChange={(e) => setSelectedRoute(e.target.value)} style={{ width: '100%' }}>
+            <option value="">— Toutes les lignes —</option>
+            {allRouteNames.filter((n) => n.toLowerCase().includes(routeSearch.toLowerCase())).map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <input id="wheelchairOnly" type="checkbox" checked={wheelchairOnly} onChange={(e) => setWheelchairOnly(e.target.checked)} />
+          <label htmlFor="wheelchairOnly">Afficher seulement accessible fauteuil</label>
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 12 }}>Filtrer arrêts (nom/id/meta)</label>
+          <input value={stopMetaFilter} onChange={(e) => setStopMetaFilter(e.target.value)} placeholder="Ex: station, parent, id..." style={{ width: '100%' }} />
+        </div>
+      </div>
+
       {Array.from(shapeMap.entries()).map(([shapeId, points]) => {
         if (!points.length) return null
         const coords = points.map((point) => [point.lat, point.lon] as [number, number])
         const routeId = shapeToRoute.get(shapeId)
         const color = (routeId && routeColor.get(routeId)) || '#3388ff'
-        return <Polyline key={shapeId} positions={coords} pathOptions={{ color, weight: 3, opacity: 0.7 }} />
+        const routeNameRaw = routeId ? routeShortName.get(routeId) : routeId
+        const routeName = typeof routeNameRaw === 'string' ? routeNameRaw.trim() : routeNameRaw
+        // apply filters for polylines
+        if (selectedRoute && typeof routeName === 'string' && routeName !== selectedRoute) return null
+        if (routeSearch && typeof routeName === 'string' && !routeName.toLowerCase().includes(routeSearch.toLowerCase())) return null
+        if (wheelchairOnly && routeId) {
+          const rw = routeWheelchair.get(routeId)
+          if (!rw) return null
+        }
+        const ShapePolyline: React.FC<{
+          positions: [number, number][]
+          color: string
+          routeName?: string
+          routeId?: string
+        }> = ({ positions, color, routeName, routeId }) => {
+          const map = useMap()
+          const onClick = (e: any) => {
+            const title = routeName || routeId || 'Ligne'
+            L.popup().setLatLng(e.latlng).setContent(`<div>ligne:<strong>${title}</strong></div>`).openOn(map)
+          }
+          return <Polyline positions={positions} pathOptions={{ color, weight: 3, opacity: 0.7 }} eventHandlers={{ click: onClick }} />
+        }
+
+        return <ShapePolyline key={shapeId} positions={coords} color={color} routeName={routeName} routeId={routeId} />
       })}
 
-      {/* render stops using clustering */}
-      <StopClusters stopPoints={stopPoints} />
+  <StopClusters
+        stopPoints={stopPoints}
+        stopRoutesMap={stopToRouteNames}
+        stopRouteIdsMap={stopToRouteIds}
+        routeWheelchair={routeWheelchair}
+        selectedRoute={selectedRoute}
+        routeSearch={routeSearch}
+        wheelchairOnly={wheelchairOnly}
+        stopMetaFilter={stopMetaFilter}
+      />
     </MapContainer>
   )
 }

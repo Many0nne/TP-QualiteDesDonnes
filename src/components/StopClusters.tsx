@@ -1,108 +1,87 @@
-import { useMemo, useState, useEffect } from 'react'
-import { Marker, Popup, useMap } from 'react-leaflet'
+import { useEffect } from 'react'
+import { useMap } from 'react-leaflet'
 import L from 'leaflet'
-import type { StopPoint, Cluster } from '../types/gtfs'
+import 'leaflet.markercluster'
+import 'leaflet.markercluster/dist/MarkerCluster.css'
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
+import type { StopPoint } from '../types/gtfs'
 
 type Props = {
   stopPoints: StopPoint[]
-  gridSizePx?: number
+  stopRoutesMap?: Map<string, string[]>
+  stopRouteIdsMap?: Map<string, string[]>
+  routeWheelchair?: Map<string, boolean>
+  selectedRoute?: string
+  routeSearch?: string
+  wheelchairOnly?: boolean
+  stopMetaFilter?: string
 }
 
-export default function StopClusters({ stopPoints, gridSizePx = 60 }: Props) {
+export default function StopClusters({ stopPoints, stopRoutesMap, stopRouteIdsMap, routeWheelchair, selectedRoute, routeSearch, wheelchairOnly, stopMetaFilter }: Props) {
   const map = useMap()
-  const [clusters, setClusters] = useState<Cluster[]>([])
-
-  const computeClusters = useMemo(() => {
-    return () => {
-      try {
-        const grid = new Map<string, { sumLat: number; sumLon: number; count: number; stops: StopPoint[] }>()
-
-        for (const stop of stopPoints) {
-          const latlng = L.latLng(stop.lat, stop.lon)
-          const point = map.latLngToLayerPoint(latlng)
-          const keyX = Math.floor(point.x / gridSizePx)
-          const keyY = Math.floor(point.y / gridSizePx)
-          const key = `${keyX}:${keyY}`
-          if (!grid.has(key)) grid.set(key, { sumLat: 0, sumLon: 0, count: 0, stops: [] })
-          const cell = grid.get(key)!
-          cell.sumLat += stop.lat
-          cell.sumLon += stop.lon
-          cell.count += 1
-          cell.stops.push(stop)
-        }
-
-        const newClusters: Cluster[] = []
-        for (const [, cell] of grid.entries()) {
-          const centroidLat = cell.sumLat / cell.count
-          const centroidLon = cell.sumLon / cell.count
-          newClusters.push({ lat: centroidLat, lon: centroidLon, count: cell.count, stops: cell.stops })
-        }
-        setClusters(newClusters)
-      } catch (err) {
-        // map may not be ready yet
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map, stopPoints, gridSizePx])
 
   useEffect(() => {
-    computeClusters()
-    const onMoveEnd = () => computeClusters()
-    map.on('moveend', onMoveEnd)
-    map.on('zoomend', onMoveEnd)
-    return () => {
-      map.off('moveend', onMoveEnd)
-      map.off('zoomend', onMoveEnd)
+    if (!map) return
+
+    const clusterGroup = (L as any).markerClusterGroup({ chunkedLoading: true })
+
+    const matchesStopMeta = (s: StopPoint) => {
+      if (!stopMetaFilter) return true
+      const q = stopMetaFilter.toLowerCase()
+      return (
+        (s.name && s.name.toLowerCase().includes(q)) ||
+        (s.id && s.id.toLowerCase().includes(q)) ||
+        (s.parent_station && s.parent_station.toLowerCase().includes(q)) ||
+        (s.location_type && s.location_type.toLowerCase().includes(q))
+      )
     }
-  }, [computeClusters, map])
 
-  return (
-    <>
-      {clusters.map((cluster, idx) => {
-        const position = [cluster.lat, cluster.lon] as [number, number]
-        if (cluster.count === 1) {
-          const s = cluster.stops[0]
-          return (
-            <Marker key={s.id} position={[s.lat, s.lon]}>
-              <Popup>
-                <div><strong>{s.name}</strong></div>
-                <div>ID: {s.id}</div>
-                <div>Location Type: {s.location_type}</div>
-                <div>Parent Station ID: {s.parent_station || '—'}</div>
-                <div>Wheelchair Boarding: {s.wheelchair_boarding}</div>
-              </Popup>
-            </Marker>
-          )
-        }
+    const matchesRouteFilters = (s: StopPoint) => {
+      const names = stopRoutesMap?.get(s.id) || []
+      const ids = stopRouteIdsMap?.get(s.id) || []
 
-        const html = `<div style="display:flex;align-items:center;justify-content:center;border-radius:50%;background:#2A93EE;color:white;width:32px;height:32px;border:3px solid white;box-shadow:0 0 0 2px rgba(0,0,0,0.1)">${cluster.count}</div>`
-        const divIcon = L.divIcon({ html, className: 'custom-cluster-icon', iconSize: [32, 32] })
+      if (selectedRoute) {
+        if (!names.some((n) => n === selectedRoute)) return false
+      }
+      if (routeSearch) {
+        const q = routeSearch.toLowerCase()
+        if (!names.some((n) => n.toLowerCase().includes(q))) return false
+      }
+      if (wheelchairOnly) {
+        const stopAccessible = s.wheelchair_boarding === '1'
+        const routeAccessible = ids.some((rid) => routeWheelchair?.get(rid))
+        if (!stopAccessible && !routeAccessible) return false
+      }
+      return true
+    }
 
-        const onClusterClick = () => {
-          const latlngs = cluster.stops.map((s) => [s.lat, s.lon] as [number, number])
-          try {
-            const bounds = L.latLngBounds(latlngs)
-            map.fitBounds(bounds.pad(1.2))
-          } catch (e) {
-            map.setView(position, map.getZoom() + 2)
-          }
-        }
+    for (const s of stopPoints) {
+      if (!matchesStopMeta(s)) continue
+      if (!matchesRouteFilters(s)) continue
 
-        return (
-          <Marker key={`cluster-${idx}`} position={position} icon={divIcon} eventHandlers={{ click: onClusterClick }}>
-            <Popup>
-              <div><strong>Cluster — {cluster.count} arrêts</strong></div>
-              <div>Exemples :</div>
-              <ul style={{ maxHeight: 120, overflow: 'auto', paddingLeft: 16 }}>
-                {cluster.stops.slice(0, 10).map((s) => (
-                  <li key={s.id}>{s.id} — {s.name}</li>
-                ))}
-              </ul>
-              <div style={{ opacity: 0.85, fontSize: 12 }}>(Cliquez sur le cluster pour zoomer sur la zone)</div>
-            </Popup>
-          </Marker>
-        )
-      })}
-    </>
-  )
+      const m = L.marker([s.lat, s.lon])
+      const busList = stopRoutesMap?.get(s.id)?.join(', ') || ''
+      const popupParts: string[] = []
+      popupParts.push(`<div><strong>${s.name}</strong></div>`)
+      popupParts.push(`<div>ID: ${s.id}</div>`)
+      popupParts.push(`<div>Location Type: ${s.location_type}</div>`)
+      popupParts.push(`<div>Parent Station ID: ${s.parent_station || '—'}</div>`)
+      popupParts.push(`<div>Wheelchair Boarding: ${s.wheelchair_boarding}</div>`)
+      if (busList) popupParts.push(`<div style="margin-top:6px"><strong>Bus(s):</strong><div>${busList}</div></div>`)
+      m.bindPopup(popupParts.join(''))
+      clusterGroup.addLayer(m)
+    }
+
+    map.addLayer(clusterGroup)
+
+    return () => {
+      try {
+        map.removeLayer(clusterGroup)
+      } catch (e) {
+        // ignore
+      }
+    }
+  }, [map, stopPoints, stopRoutesMap, stopRouteIdsMap, routeWheelchair, selectedRoute, routeSearch, wheelchairOnly, stopMetaFilter])
+
+  return null
 }
