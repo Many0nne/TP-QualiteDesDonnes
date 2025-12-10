@@ -6,12 +6,12 @@ import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerIcon from 'leaflet/dist/images/marker-icon.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
 import stopsTxt from '../data/stops.txt?raw'
-import shapesTxt from '../data/shapes.txt?raw'
+import routesStopsTxt from '../data/routes_stops.txt?raw'
 import tripsTxt from '../data/trips.txt?raw'
 import routesTxt from '../data/routes.txt?raw'
 import parseCSV from '../utils/parseCSV'
 import StopClusters from './StopClusters'
-import type { StopRow, ShapeRow, ShapePoint, TripRow, RouteRow, StopPoint } from '../types/gtfs'
+import type { StopRow, TripRow, RouteRow, StopPoint } from '../types/gtfs'
 
 // Configuration des icônes Leaflet
 // - Par défaut, Leaflet essaie de résoudre les URLs d'icônes via un mécanisme interne.
@@ -30,39 +30,30 @@ L.Icon.Default.mergeOptions({
 const LeafletMap: React.FC = () => {
   // Chargement et parsing des fichiers GTFS
   // - `stops.txt` : arrêts et métadonnées associées
-  // - `shapes.txt` : points de tracé des lignes (polylines)
-  // - `trips.txt` : voyages (associe `shape_id` aux `route_id`, infos accessibilité)
+  // - `routes_stops.txt` : ordre des arrêts par ligne (route_id)
+  // - `trips.txt` : voyages (associe `trip_id`/`shape_id` aux `route_id`, infos accessibilité)
   // - `routes.txt` : informations de ligne (nom court, couleur, etc.)
   const stops = useMemo(() => parseCSV(stopsTxt) as StopRow[], [])
-  const shapes = useMemo(() => parseCSV(shapesTxt) as ShapeRow[], [])
+  const routesStops = useMemo(() => parseCSV(routesStopsTxt) as Array<{ route_id: string; stop_id: string }>, [])
   const trips = useMemo(() => parseCSV(tripsTxt) as TripRow[], [])
   const routes = useMemo(() => parseCSV(routesTxt) as RouteRow[], [])
 
-  // Fonction pour récupérer la géométrie précise via OSRM
-  const fetchRouteGeometry = async (points: { lat: number; lon: number }[]) => {
-    if (points.length < 2) return null
-
-    // OSRM attend des coordonnées format "lon,lat" séparées par des ";"
-    // On prend un sous-échantillon si trop de points pour éviter les erreurs d'URL trop longue
-    // (Pour un vrai projet, on ferait du POST ou du map matching)
-    const coordsString = points
-      .map(p => `${p.lon},${p.lat}`)
-      .join(';')
-
+  // Optionnel: améliore le tracé via OSRM à partir des arrêts ordonnés
+  const fetchRouteGeometry = async (positions: [number, number][]) => {
+    if (!positions || positions.length < 2) return null
+    // OSRM attend "lon,lat"; nos positions sont [lat, lon]
+    const coordsString = positions.map(([lat, lon]) => `${lon},${lat}`).join(';')
     try {
-      // Appel à l'API publique de démo OSRM (Driving ou Driving-bus si dispo)
       const response = await fetch(
         `https://router.project-osrm.org/route/v1/driving/${coordsString}?overview=full&geometries=geojson`
       )
       const data = await response.json()
-      
-      if (data.routes && data.routes.length > 0) {
-        // OSRM renvoie du GeoJSON [lon, lat], Leaflet veut [lat, lon]
-        const coordinates = data.routes[0].geometry.coordinates
-        return coordinates.map((c: number[]) => [c[1], c[0]] as [number, number])
+      if (data?.routes?.length) {
+        const coordinates: number[][] = data.routes[0].geometry.coordinates
+        return coordinates.map((c) => [c[1], c[0]] as [number, number])
       }
     } catch (error) {
-      console.error("Erreur récupération itinéraire OSRM", error)
+      console.error('Erreur récupération itinéraire OSRM', error)
     }
     return null
   }
@@ -93,50 +84,20 @@ const LeafletMap: React.FC = () => {
     )
   }, [stops])
 
-  // Regroupe les points de tracé par `shape_id`, puis trie par `shape_pt_sequence`.
-  // Résultat: pour chaque `shape_id`, on obtient un tableau ordonné de points
-  // qui pourra être passé à un `<Polyline />` pour dessiner l'itinéraire.
-  const shapeMap: Map<string, ShapePoint[]> = useMemo(() => {
-    const shapeGroups = new Map<string, ShapePoint[]>()
-    for (const shapeRow of shapes) {
-      const shapeId = shapeRow.shape_id
-      const lat = parseFloat(shapeRow.shape_pt_lat)
-      const lon = parseFloat(shapeRow.shape_pt_lon)
-      const seq = parseInt(shapeRow.shape_pt_sequence || '0', 10)
-      if (!shapeGroups.has(shapeId)) shapeGroups.set(shapeId, [])
-      shapeGroups.get(shapeId)!.push({ lat, lon, seq })
+  // Mapping route_id -> liste ordonnée des stop_id (ordre tel que dans le fichier)
+  const routeToStopIds: Map<string, string[]> = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const row of routesStops) {
+      const rid = (row.route_id || '').trim()
+      const sid = (row.stop_id || '').trim()
+      if (!rid || !sid) continue
+      if (!m.has(rid)) m.set(rid, [])
+      m.get(rid)!.push(sid)
     }
-    for (const pointsArray of shapeGroups.values()) {
-      pointsArray.sort((a, b) => a.seq - b.seq)
-    }
-    return shapeGroups
-  }, [shapes])
+    return m
+  }, [routesStops])
 
-  // Associe chaque `shape_id` à une `route_id` via `trips.txt`
-  // - Un `shape_id` peut apparaître plusieurs fois, on garde la première association rencontrée.
-  const shapeToRoute: Map<string, string> = useMemo(() => {
-    const shapeToRouteMap = new Map<string, string>()
-    for (const tripRow of trips) {
-      const shapeId = tripRow.shape_id
-      const routeId = tripRow.route_id
-      if (shapeId && routeId && !shapeToRouteMap.has(shapeId)) shapeToRouteMap.set(shapeId, routeId)
-    }
-    return shapeToRouteMap
-  }, [trips])
-
-  // Crée un mapping `route_id` -> couleur (#RRGGBB)
-  // - Certaines agences fournissent `route_color` sans le caractère '#', on l'ajoute.
-  // - Utilisé pour styliser les polylines par ligne.
-  const routeColor: Map<string, string> = useMemo(() => {
-    const routeColorMap = new Map<string, string>()
-    for (const routeRow of routes) {
-      const id = routeRow.route_id
-      let color = routeRow.route_color || ''
-      if (color && !color.startsWith('#')) color = '#' + color
-      if (id) routeColorMap.set(id, color)
-    }
-    return routeColorMap
-  }, [routes])
+  // (Couleur: nous utiliserons `routes.route_color` directement par route)
 
   // Crée un mapping `route_id` -> nom court
   // - Si `route_short_name` est absent, on essaie `route_long_name`, sinon on retombe sur l'id.
@@ -148,92 +109,27 @@ const LeafletMap: React.FC = () => {
     return m
   }, [routes])
 
-  // Distance Haversine (m) entre deux coordonnées WGS84 (lat/lon)
-  // - Utile pour mesurer la distance entre un arrêt et un point isolé de shape.
-  const haversine = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-    const toRad = (v: number) => (v * Math.PI) / 180
-    const R = 6371000
-    const dLat = toRad(lat2 - lat1)
-    const dLon = toRad(lon2 - lon1)
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return R * c
-  }
-
-  // Distance (m) d'un point à un segment géographique AB
-  // - Approximation locale: conversion degrés -> mètres via latitude moyenne
-  // - Permet d'estimer la proximité d'un arrêt par rapport à une portion de ligne.
-  const pointToSegmentDistance = (
-    p: { lat: number; lon: number },
-    v: { lat: number; lon: number },
-    w: { lat: number; lon: number }
-  ) => {
-    const meanLat = (v.lat + w.lat + p.lat) / 3
-    const mPerDegLat = 111320
-    const mPerDegLon = Math.cos((meanLat * Math.PI) / 180) * 111320
-    const px = (p.lon - v.lon) * mPerDegLon
-    const py = (p.lat - v.lat) * mPerDegLat
-    const wx = (w.lon - v.lon) * mPerDegLon
-    const wy = (w.lat - v.lat) * mPerDegLat
-    const l2 = wx * wx + wy * wy
-    let t = 0
-    if (l2 !== 0) t = Math.max(0, Math.min(1, (px * wx + py * wy) / l2))
-    const projx = t * wx
-    const projy = t * wy
-    const dx = px - projx
-    const dy = py - projy
-    return Math.sqrt(dx * dx + dy * dy)
-  }
-
-  // Associe chaque arrêt aux lignes proches
-  // - Pour chaque polyline (shape), on calcule la distance minimale entre l'arrêt et
-  //   les segments consécutifs de la polyline; si en-dessous du seuil, on relie l'arrêt à la ligne.
-  // - `mapRes` stocke les noms de lignes, `mapResIds` stocke les `route_id`.
-  const stopToRouteNames: Map<string, string[]> = useMemo(() => {
-    const thresholdMeters = 80
-    const mapRes = new Map<string, Set<string>>()
-    const mapResIds = new Map<string, Set<string>>()
-    for (const [shapeId, points] of Array.from(shapeMap.entries())) {
-      const routeId = shapeToRoute.get(shapeId)
-      if (!routeId) continue
-      const routeName = (routeShortName.get(routeId) || routeId) as string
-      for (const stop of stopPoints) {
-        let minDistance = Infinity
-        for (let i = 0; i < points.length - 1; i++) {
-          const pointA = points[i]
-          const pointB = points[i + 1]
-          const distance = pointToSegmentDistance(
-            { lat: stop.lat, lon: stop.lon },
-            { lat: pointA.lat, lon: pointA.lon },
-            { lat: pointB.lat, lon: pointB.lon }
-          )
-          if (distance < minDistance) minDistance = distance
-        }
-        if (points.length === 1) {
-          const distance = haversine(stop.lat, stop.lon, points[0].lat, points[0].lon)
-          if (distance < minDistance) minDistance = distance
-        }
-        if (minDistance <= thresholdMeters) {
-          if (!mapRes.has(stop.id)) mapRes.set(stop.id, new Set())
-          mapRes.get(stop.id)!.add(routeName)
-          if (!mapResIds.has(stop.id)) mapResIds.set(stop.id, new Set())
-          mapResIds.get(stop.id)!.add(routeId)
-        }
+  // Associe chaque arrêt aux lignes directement via routes_stops
+  const stopToRouteIds: Map<string, string[]> = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [routeId, stopIds] of routeToStopIds.entries()) {
+      for (const sid of stopIds) {
+        if (!m.has(sid)) m.set(sid, new Set())
+        m.get(sid)!.add(routeId)
       }
     }
-    // Conversion des Sets vers des tableaux pour un usage plus simple côté composants
-    const final = new Map<string, string[]>()
-    for (const [k, s] of mapRes.entries()) final.set(k, Array.from(s))
-    ;(final as any).__ids = new Map<string, string[]>()
-    for (const [k, s] of mapResIds.entries()) (final as any).__ids.set(k, Array.from(s))
-    return final
-  }, [shapeMap, shapeToRoute, stopPoints, routeShortName])
+    const out = new Map<string, string[]>()
+    for (const [sid, set] of m.entries()) out.set(sid, Array.from(set))
+    return out
+  }, [routeToStopIds])
 
-  // Version id: mapping `stop_id` -> liste des `route_id` associées
-  // - On attache temporairement `__ids` au Map précédent pour éviter de maintenir deux structures.
-  const stopToRouteIds: Map<string, string[]> = useMemo(() => {
-    return ((stopToRouteNames as any).__ids as Map<string, string[]>) || new Map()
-  }, [stopToRouteNames])
+  const stopToRouteNames: Map<string, string[]> = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const [sid, routeIds] of stopToRouteIds.entries()) {
+      m.set(sid, routeIds.map((rid) => routeShortName.get(rid) || rid))
+    }
+    return m
+  }, [stopToRouteIds, routeShortName])
 
   // Mapping `route_id` -> accessibilité, déduit depuis `trips.txt`
   // - `wheelchair_accessible` dans GTFS trips: 1 = accessible, 2 = non-accessible, 0 = inconnu
@@ -256,34 +152,37 @@ const LeafletMap: React.FC = () => {
   const [wheelchairOnly, setWheelchairOnly] = useState<boolean>(false)
   const [stopMetaFilter, setStopMetaFilter] = useState<string>('')
   const [hdPolyline, setHdPolyline] = useState<[number, number][] | null>(null)
+  // Polylines: construit pour chaque route en reliant les arrêts de `routes_stops`
+  const routePolylines = useMemo(() => {
+    const res: Array<{ routeId: string; routeName: string; color: string; coords: [number, number][] }> = []
+    const routeMeta = new Map(routes.map((r) => [r.route_id || '', r]))
+    for (const [routeId, stopIds] of routeToStopIds.entries()) {
+      const coords: [number, number][] = []
+      for (const sid of stopIds) {
+        const sp = stopPoints.find((s) => s.id === sid)
+        if (sp) coords.push([sp.lat, sp.lon])
+      }
+      if (coords.length < 2) continue
+      const r = routeMeta.get(routeId || '')
+      const name = (r?.route_short_name || r?.route_long_name || routeId) as string
+      let color = (r?.route_color || '') as string
+      if (color && !color.startsWith('#')) color = '#' + color
+      if (!color) color = '#3388ff'
+      res.push({ routeId, routeName: name, color, coords })
+    }
+    return res
+  }, [routeToStopIds, stopPoints, routes])
 
-  // Effet pour charger la géométrie quand une ligne est sélectionnée
+  // Quand une ligne est sélectionnée, tente d'améliorer son tracé via OSRM
   React.useEffect(() => {
-    setHdPolyline(null) // Reset quand on change de ligne
+    setHdPolyline(null)
     if (!selectedRoute) return
-
-    // Trouver le shapeId correspondant à la route sélectionnée
-    // (Simplification : on prend le premier shapeId qui correspond à cette route)
-    // Note: Dans un cas réel complexe, une route peut avoir plusieurs shapes (aller/retour/variantes)
-    let targetShapeId = ''
-    for (const [sId, rId] of shapeToRoute.entries()) {
-      const name = routeShortName.get(rId)
-      if (name === selectedRoute) {
-        targetShapeId = sId
-        break
-      }
-    }
-
-    if (targetShapeId) {
-      const points = shapeMap.get(targetShapeId)
-      if (points) {
-        // On appelle OSRM avec les points de ce shape
-        fetchRouteGeometry(points).then(geo => {
-          if (geo) setHdPolyline(geo)
-        })
-      }
-    }
-  }, [selectedRoute, shapeToRoute, routeShortName, shapeMap])
+    const poly = routePolylines.find((p) => p.routeName === selectedRoute)
+    if (!poly) return
+    fetchRouteGeometry(poly.coords).then((geo) => {
+      if (geo) setHdPolyline(geo)
+    })
+  }, [selectedRoute, routePolylines])
 
   // Liste triée des noms de lignes disponibles (pour le sélecteur)
   // - On déduplique via Set, puis on ordonne alphabétiquement.
@@ -322,13 +221,7 @@ const LeafletMap: React.FC = () => {
         </div>
       </div>
 
-      {Array.from(shapeMap.entries()).map(([shapeId, points]) => {
-        if (!points.length) return null
-        const coords = points.map((point) => [point.lat, point.lon] as [number, number])
-        const routeId = shapeToRoute.get(shapeId)
-        const color = (routeId && routeColor.get(routeId)) || '#3388ff'
-        const routeNameRaw = routeId ? routeShortName.get(routeId) : routeId
-        const routeName = typeof routeNameRaw === 'string' ? routeNameRaw.trim() : routeNameRaw
+      {routePolylines.map(({ routeId, routeName, color, coords }) => {
         // Applique les filtres d'affichage aux polylines de lignes
         // - Filtre par sélection stricte (`selectedRoute`) ou recherche exacte (`routeSearch`).
         // - Mode accessibilité: montre les lignes marquées accessibles OU reliées à un arrêt accessible.
@@ -338,7 +231,7 @@ const LeafletMap: React.FC = () => {
           if (routeSearch && normalized !== routeSearch.toLowerCase()) return false
           return true
         }
-        if (!matchesRouteNameFilter(typeof routeName === 'string' ? routeName : undefined)) return null
+        if (!matchesRouteNameFilter(routeName)) return null
         if (wheelchairOnly && routeId) {
           const rw = routeWheelchair.get(routeId)
           if (!rw) {
@@ -370,9 +263,8 @@ const LeafletMap: React.FC = () => {
         }
 
         const isSelected = selectedRoute && routeName === selectedRoute
-        const positionsToRender = (isSelected && hdPolyline) ? hdPolyline : coords
-
-        return <ShapePolyline key={shapeId} positions={positionsToRender} color={color} routeName={routeName} routeId={routeId} weight={isSelected ? 5 : 3} />
+        const positionsToRender = isSelected && hdPolyline ? hdPolyline : coords
+        return <ShapePolyline key={routeId} positions={positionsToRender} color={color} routeName={routeName} routeId={routeId} weight={isSelected ? 5 : 3} />
       })}
 
   <StopClusters
