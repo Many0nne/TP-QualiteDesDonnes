@@ -38,6 +38,35 @@ const LeafletMap: React.FC = () => {
   const trips = useMemo(() => parseCSV(tripsTxt) as TripRow[], [])
   const routes = useMemo(() => parseCSV(routesTxt) as RouteRow[], [])
 
+  // Fonction pour récupérer la géométrie précise via OSRM
+  const fetchRouteGeometry = async (points: { lat: number; lon: number }[]) => {
+    if (points.length < 2) return null
+
+    // OSRM attend des coordonnées format "lon,lat" séparées par des ";"
+    // On prend un sous-échantillon si trop de points pour éviter les erreurs d'URL trop longue
+    // (Pour un vrai projet, on ferait du POST ou du map matching)
+    const coordsString = points
+      .map(p => `${p.lon},${p.lat}`)
+      .join(';')
+
+    try {
+      // Appel à l'API publique de démo OSRM (Driving ou Driving-bus si dispo)
+      const response = await fetch(
+        `https://router.project-osrm.org/route/v1/driving/${coordsString}?overview=full&geometries=geojson`
+      )
+      const data = await response.json()
+      
+      if (data.routes && data.routes.length > 0) {
+        // OSRM renvoie du GeoJSON [lon, lat], Leaflet veut [lat, lon]
+        const coordinates = data.routes[0].geometry.coordinates
+        return coordinates.map((c: number[]) => [c[1], c[0]] as [number, number])
+      }
+    } catch (error) {
+      console.error("Erreur récupération itinéraire OSRM", error)
+    }
+    return null
+  }
+
   // Construit une liste d'objets `StopPoint` exploitable par Leaflet
   // - Valide que lat/lon sont bien des nombres
   // - Conserve des champs GTFS utiles à l'info-bulle: type, station parente, accessibilité
@@ -226,6 +255,35 @@ const LeafletMap: React.FC = () => {
   const [routeSearch, setRouteSearch] = useState<string>('')
   const [wheelchairOnly, setWheelchairOnly] = useState<boolean>(false)
   const [stopMetaFilter, setStopMetaFilter] = useState<string>('')
+  const [hdPolyline, setHdPolyline] = useState<[number, number][] | null>(null)
+
+  // Effet pour charger la géométrie quand une ligne est sélectionnée
+  React.useEffect(() => {
+    setHdPolyline(null) // Reset quand on change de ligne
+    if (!selectedRoute) return
+
+    // Trouver le shapeId correspondant à la route sélectionnée
+    // (Simplification : on prend le premier shapeId qui correspond à cette route)
+    // Note: Dans un cas réel complexe, une route peut avoir plusieurs shapes (aller/retour/variantes)
+    let targetShapeId = ''
+    for (const [sId, rId] of shapeToRoute.entries()) {
+      const name = routeShortName.get(rId)
+      if (name === selectedRoute) {
+        targetShapeId = sId
+        break
+      }
+    }
+
+    if (targetShapeId) {
+      const points = shapeMap.get(targetShapeId)
+      if (points) {
+        // On appelle OSRM avec les points de ce shape
+        fetchRouteGeometry(points).then(geo => {
+          if (geo) setHdPolyline(geo)
+        })
+      }
+    }
+  }, [selectedRoute, shapeToRoute, routeShortName, shapeMap])
 
   // Liste triée des noms de lignes disponibles (pour le sélecteur)
   // - On déduplique via Set, puis on ordonne alphabétiquement.
@@ -299,7 +357,8 @@ const LeafletMap: React.FC = () => {
           color: string
           routeName?: string
           routeId?: string
-        }> = ({ positions, color, routeName, routeId }) => {
+          weight?: number
+        }> = ({ positions, color, routeName, routeId, weight = 3 }) => {
           const map = useMap()
           const onClick = (e: any) => {
             // Interaction: au clic sur une polyline, affiche une popup
@@ -307,10 +366,13 @@ const LeafletMap: React.FC = () => {
             const title = routeName || routeId || 'Ligne'
             L.popup().setLatLng(e.latlng).setContent(`<div>ligne:<strong>${title}</strong></div>`).openOn(map)
           }
-          return <Polyline positions={positions} pathOptions={{ color, weight: 3, opacity: 0.7 }} eventHandlers={{ click: onClick }} />
+          return <Polyline positions={positions} pathOptions={{ color, weight, opacity: 0.7 }} eventHandlers={{ click: onClick }} />
         }
 
-        return <ShapePolyline key={shapeId} positions={coords} color={color} routeName={routeName} routeId={routeId} />
+        const isSelected = selectedRoute && routeName === selectedRoute
+        const positionsToRender = (isSelected && hdPolyline) ? hdPolyline : coords
+
+        return <ShapePolyline key={shapeId} positions={positionsToRender} color={color} routeName={routeName} routeId={routeId} weight={isSelected ? 5 : 3} />
       })}
 
   <StopClusters
