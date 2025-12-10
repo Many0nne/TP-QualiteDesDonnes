@@ -16,6 +16,10 @@ type Props = {
   wheelchairOnly?: boolean
   stopMetaFilter?: string
 }
+const STOP_IMAGES: Record<string, string> = {
+  'COMM': 'https://media.ouest-france.fr/v1/pictures/MjAyMTA4OGEyYTQ1MjQ1NTYxMGVkYTllM2E1MDc1M2U5ODZkZTk?width=1260&height=708&focuspoint=50%2C25&cropresize=1&client_id=bpeditorial&sign=9b67ededbd2c17e7ebd1e628395cdd06b304cf76854904e9c3b16a4ba95cd94f',
+  'DCAN': 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcREs2Toe4kNsMy1s12js0Tabc429hfWxyrjSg&s',
+}
 
 export default function StopClusters({ stopPoints, stopRoutesMap, stopRouteIdsMap, routeWheelchair, selectedRoute, routeSearch, wheelchairOnly, stopMetaFilter }: Props) {
   const map = useMap()
@@ -72,6 +76,17 @@ export default function StopClusters({ stopPoints, stopRoutesMap, stopRouteIdsMa
       const marker = L.marker([stop.lat, stop.lon])
       const busList = stopRoutesMap?.get(stop.id)?.join(', ') || ''
       const popupParts: string[] = []
+      
+      // Insertion de l'image si elle existe pour cet arrêt
+      const imageUrl = STOP_IMAGES[stop.parent_station]
+      if (imageUrl) {
+        popupParts.push(
+          `<div style="margin-bottom:8px;">
+            <img src="${imageUrl}" alt="${stop.name}" style="width:100%; height:120px; object-fit:cover; border-radius:4px;" />
+           </div>`
+        )
+      }
+
       popupParts.push(`<div><strong>${stop.name}</strong></div>`)
       popupParts.push(`<div>ID: ${stop.id}</div>`)
       popupParts.push(`<div>Location Type: ${stop.location_type}</div>`)
