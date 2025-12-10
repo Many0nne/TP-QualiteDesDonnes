@@ -10,6 +10,8 @@ import routesStopsTxt from '../data/routes_stops.txt?raw'
 import tripsTxt from '../data/trips.txt?raw'
 import routesTxt from '../data/routes.txt?raw'
 import parseCSV from '../utils/parseCSV'
+import OSMRelation from './OSMRelation'
+import osmRelationsRaw from '../data/osm_relations.json'
 import StopClusters from './StopClusters'
 import type { StopRow, TripRow, RouteRow, StopPoint } from '../types/gtfs'
 
@@ -97,6 +99,23 @@ const LeafletMap: React.FC = () => {
     return m
   }, [routesStops])
 
+  // Normalise et transforme osmRelationsRaw en Map<routeNameNormalized, relationId>
+  const osmRelationMapNormalized: Map<string, number> = useMemo(() => {
+    if (!osmRelationsRaw) return new Map()
+    if (Array.isArray(osmRelationsRaw)) {
+      return new Map(
+        osmRelationsRaw.map((e: any) => {
+          const rawKey = e.route_name ?? e.route_short_name ?? e.route_id ?? e.key ?? ''
+          const key = String(rawKey).trim().toLowerCase()
+          return [key, Number(e.relation_id)]
+        })
+      )
+    }
+    return new Map(
+      Object.entries(osmRelationsRaw).map(([k, v]) => [String(k).trim().toLowerCase(), Number(v)])
+    )
+  }, [osmRelationsRaw])
+
   // (Couleur: nous utiliserons `routes.route_color` directement par route)
 
   // Crée un mapping `route_id` -> nom court
@@ -177,12 +196,13 @@ const LeafletMap: React.FC = () => {
   React.useEffect(() => {
     setHdPolyline(null)
     if (!selectedRoute) return
+    if (osmRelationMapNormalized.has(selectedRoute.trim().toLowerCase())) return
     const poly = routePolylines.find((p) => p.routeName === selectedRoute)
     if (!poly) return
     fetchRouteGeometry(poly.coords).then((geo) => {
       if (geo) setHdPolyline(geo)
     })
-  }, [selectedRoute, routePolylines])
+}, [selectedRoute, routePolylines, osmRelationMapNormalized])
 
   // Liste triée des noms de lignes disponibles (pour le sélecteur)
   // - On déduplique via Set, puis on ordonne alphabétiquement.
@@ -222,6 +242,29 @@ const LeafletMap: React.FC = () => {
       </div>
 
       {routePolylines.map(({ routeId, routeName, color, coords }) => {
+        // Vérifie si une relation OSM existe pour cette ligne
+        // - Utilise le nom de la ligne normalisé pour chercher dans `osmRelationMapNormalized`
+        const normalized = (routeName || '').trim().toLowerCase()
+        const relationId = normalized ? osmRelationMapNormalized.get(normalized) : undefined
+        if (relationId) {
+          // Applique ici mêmes filtres que pour les polylines (selectedRoute, routeSearch, wheelchairOnly)
+          if (selectedRoute && routeName !== selectedRoute) return null
+          if (routeSearch && normalized !== routeSearch.toLowerCase()) return null
+          // WheelchairOnly check
+          if (wheelchairOnly && routeId) {
+            const rw = routeWheelchair.get(routeId)
+            if (!rw) {
+              const hasAccessibleStopOnRoute = stopPoints.some((s) => {
+                const ids = stopToRouteIds.get(s.id) || []
+                const stopAccessible = s.wheelchair_boarding === '1'
+                return stopAccessible && ids.includes(routeId)
+              })
+              if (!hasAccessibleStopOnRoute) return null
+            }
+          }
+          return <OSMRelation key={`osm-${routeName}`} relationId={relationId} color={color} />
+        }
+
         // Applique les filtres d'affichage aux polylines de lignes
         // - Filtre par sélection stricte (`selectedRoute`) ou recherche exacte (`routeSearch`).
         // - Mode accessibilité: montre les lignes marquées accessibles OU reliées à un arrêt accessible.
