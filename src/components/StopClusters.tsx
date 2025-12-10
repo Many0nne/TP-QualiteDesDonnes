@@ -17,8 +17,8 @@ type Props = {
   stopMetaFilter?: string
 }
 const STOP_IMAGES: Record<string, string> = {
-  'COMM': 'https://media.ouest-france.fr/v1/pictures/MjAyMTA4OGEyYTQ1MjQ1NTYxMGVkYTllM2E1MDc1M2U5ODZkZTk?width=1260&height=708&focuspoint=50%2C25&cropresize=1&client_id=bpeditorial&sign=9b67ededbd2c17e7ebd1e628395cdd06b304cf76854904e9c3b16a4ba95cd94f',
-  'DCAN': 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcREs2Toe4kNsMy1s12js0Tabc429hfWxyrjSg&s',
+  'COMC1': 'https://media.ouest-france.fr/v1/pictures/MjAyMTA4OGEyYTQ1MjQ1NTYxMGVkYTllM2E1MDc1M2U5ODZkZTk?width=1260&height=708&focuspoint=50%2C25&cropresize=1&client_id=bpeditorial&sign=9b67ededbd2c17e7ebd1e628395cdd06b304cf76854904e9c3b16a4ba95cd94f',
+  'DCAN1': 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcREs2Toe4kNsMy1s12js0Tabc429hfWxyrjSg&s',
 }
 
 export default function StopClusters({ stopPoints, stopRoutesMap, stopRouteIdsMap, routeWheelchair, selectedRoute, routeSearch, wheelchairOnly, stopMetaFilter }: Props) {
@@ -78,7 +78,7 @@ export default function StopClusters({ stopPoints, stopRoutesMap, stopRouteIdsMa
       const popupParts: string[] = []
       
       // Insertion de l'image si elle existe pour cet arrêt
-      const imageUrl = STOP_IMAGES[stop.parent_station]
+      const imageUrl = STOP_IMAGES[stop.id]
       if (imageUrl) {
         popupParts.push(
           `<div style="margin-bottom:8px;">
